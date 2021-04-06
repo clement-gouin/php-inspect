@@ -275,6 +275,11 @@ def read_config_list(config, section, option):
 
 
 def main():
+    if not os.path.exists("config.ini"):
+        print("config.ini not found")
+        exit(1)
+        return
+
     config = ConfigParser()
     config.read("config.ini")
 
