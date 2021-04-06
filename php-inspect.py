@@ -286,9 +286,23 @@ def write_output(db, filename):
 
 def remove_files(db):
     t0 = time()
+    delete_all = False
+    choice = "n"
+    count = 0
     for file in db.unused:
-        os.unlink(file.filename)
-    time_print(t0, f"removed {db.unused} files")
+        if not delete_all:
+            choice = input(
+                f"delete '{file.full_classname}' (y[es]/n[o]/a[ll]/c[ancel]) (n)? "
+            )
+            choice = choice.lower()[0] if choice else "n"
+            if choice == "a":
+                delete_all = True
+            elif choice == "c":
+                break
+        if delete_all or choice == "y":
+            os.unlink(file.filename)
+            count += 1
+    time_print(t0, f"removed {count} files")
 
 
 def main():
