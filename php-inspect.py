@@ -283,19 +283,20 @@ def write_output(db, filename):
     time_print(t0, f"wrote {len(db.unused)} lines in {filename}")
 
 
-def remove_file(file, level=0, to_delete=[]):
+def remove_file(file, level=0, to_delete=[], force=False):
     if level == 0:
-        choice = input(
-            f"{file.full_classname} => delete (y[es]/n[o]/a[ll]/c[ancel]) (n)? "
-        )
+        text = f"{file.full_classname} => delete (yes/no/all/cancel/recursive) (n)? "
     else:
-        choice = input(
-            f"{(level - 1) * 2 * ' ' }∟ {file.full_classname} => delete (y[es]/n[o]/a[ll]/c[ancel]) (n)? "
-        )
-    choice = choice.lower()[0] if choice else "n"
+        text = f"{(level - 1) * 2 * ' ' }∟ {file.full_classname} => delete (yes/no/all/cancel/recursive) (n)? "
+    if force:
+        print(text + "r")
+        choice = "r"
+    else:
+        choice = input(text)
+        choice = choice.lower()[0] if choice else "n"
     if choice == "a" or choice == "c":
         return choice
-    elif choice == "y":
+    elif choice == "y" or choice == "r":
         to_delete += [file]
         for called in file.called:
             if not called.is_used and called not in to_delete:
@@ -303,7 +304,7 @@ def remove_file(file, level=0, to_delete=[]):
                     if caller not in to_delete:
                         break
                 else:
-                    stop = remove_file(called, level + 1, to_delete)
+                    stop = remove_file(called, level + 1, to_delete, choice == "r")
                     if stop is not None:
                         return stop
     return None
@@ -314,14 +315,14 @@ def remove_files(db):
     for file in db.invalid:
         stop = remove_file(file, to_delete=to_delete)
         if stop == "a":
-            to_delete = [file.filename for file in db.unused]
+            to_delete = db.unused
             break
         elif stop == "c":
             to_delete = []
             break
     t0 = time()
-    for filename in to_delete:
-        os.unlink(filename)
+    for file in to_delete:
+        os.unlink(file.filename)
     time_print(t0, f"removed {len(to_delete)} files")
 
 
