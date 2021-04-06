@@ -4,6 +4,9 @@ from time import time
 from configparser import ConfigParser
 
 
+re.count = lambda pattern, string: len(re.findall(pattern, string))
+
+
 def dir_walk(*paths, file_filter=None):
     if len(paths) != 1:
         return [os.path.join(path, item) for path in paths for item in dir_walk(path)]
@@ -76,7 +79,7 @@ class File:
         self.full_classname = None
         self.type = None
         self.raw_imports = []
-        self.alias_imports = []
+        self.alias_imports = {}
         self.functions = []
         self.callers = []
         self.called = []
@@ -99,7 +102,7 @@ class File:
                 if m2:
                     self.raw_imports += [m2.groups()[0]]
                     if m2.groups()[2]:
-                        self.alias_imports += [self.raw_imports[-1]]
+                        self.alias_imports[self.raw_imports[-1]] = m2.groups()[2]
                 if m3:
                     self.classname = m3.groups()[-1]
                     self.type = m3.groups()[-2]
@@ -125,7 +128,7 @@ class File:
                             func.callers += [file]
                 else:
                     for func in self.functions:
-                        if len(re.findall(func.name, self.content)) > 1:
+                        if re.count(func.name, self.content) >= 2:
                             func.callers += [self]
 
     def is_calling(self, db, other_file):
@@ -133,11 +136,11 @@ class File:
             for imp in self.get_imports(db):
                 if imp == other_file:
                     if imp.full_classname in self.alias_imports:
-                        return True
-                    if other_file.classname in self.classname:
-                        return len(re.findall(other_file.classname, self.content)) > 2
-                    else:
-                        return len(re.findall(other_file.classname, self.content)) > 1
+                        to_find = self.alias_imports[imp.full_classname]
+                        return re.count(to_find, self.content) >= 2
+                    to_detect = 3 if other_file.classname in self.classname else 2
+                    # import + (classname) + usage
+                    return re.count(other_file.classname, self.content) >= to_detect
                 if other_file.classname in imp.classname:
                     return False
             if other_file.classname in self.classname:
@@ -274,6 +277,20 @@ def read_config_list(config, section, option):
     return [v.strip() for v in val.splitlines() if len(v.strip()) > 0]
 
 
+def write_output(db, filename):
+    t0 = time()
+    with open(filename, mode="w") as f:
+        f.write("\n".join([file.filename for file in db.unused]))
+    time_print(t0, f"wrote {len(db.unused)} lines in {filename}")
+
+
+def remove_files(db):
+    t0 = time()
+    for file in db.unused:
+        os.unlink(file.filename)
+    time_print(t0, f"removed {db.unused} files")
+
+
 def main():
     if not os.path.exists("config.ini"):
         print("config.ini not found")
@@ -306,19 +323,20 @@ def main():
         f"scanned classes and found {len(db.invalid)} invalid roots for {len(db.unused)} unused files and {db.unused_func_count} unused functions",
     )
 
-    with open(config.get("output", "output_file"), mode="w") as f:
-        f.write("\n".join([file.filename for file in db.unused]))
-
     if config.getboolean("output", "print_invalid"):
         print_invalid_branches(db)
+
     if config.getboolean("output", "print_functions"):
         print_unused_functions(db)
+
     if config.getboolean("output", "print_specific"):
         print_specific(db, config.getlist("output", "to_scan"))
 
+    if config.get("output", "output_file"):
+        write_output(db, config.get("output", "output_file"))
+
     if config.getboolean("output", "remove_files"):
-        for file in db.unused:
-            os.unlink(file.filename)
+        remove_files(db)
 
 
 main()

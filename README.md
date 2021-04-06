@@ -61,4 +61,6 @@ x> App\Jobs\Job1
 -> App\Http\Controllers\Controller1
 -> App\Http\Controllers\Controller2
 ...
+
+(0.2ms) wrote 73 lines in unused.txt
 ```
