@@ -223,16 +223,15 @@ def time_print(t0, message):
     print(f"({1000*(time()-t0):.1f}ms) {message}")
 
 
-def print_branch(file, level=0, ignore=[]):
+def print_branch(file, level=0, found=[]):
     if level == 0:
         print(file.full_classname)
     else:
         print((level - 1) * 2 * " ", "∟", file.full_classname)
-    found = [file]
+    found += [file]
     for called in file.called:
-        if not called.is_used and called not in ignore:
-            found += print_branch(called, level + 1, found)
-    return found
+        if not called.is_used and called not in found:
+            print_branch(called, level + 1, found)
 
 
 def print_invalid_branches(db):
@@ -242,7 +241,7 @@ def print_invalid_branches(db):
     print("\n\n====INVALID BRANCHES====")
     found = []
     for file in db.invalid:
-        found += print_branch(file, ignore=found)
+        print_branch(file, found=found)
 
 
 def print_unused_functions(db):
@@ -284,22 +283,39 @@ def write_output(db, filename):
     time_print(t0, f"wrote {len(db.unused)} lines in {filename}")
 
 
-def remove_files(db):
-    choice = "n"
-    to_delete = []
-    for file in db.unused:
+def remove_file(file, level=0, to_delete=[], found=[]):
+    if level == 0:
         choice = input(
-            f"delete '{file.full_classname}' (y[es]/n[o]/a[ll]/c[ancel]) (n)? "
+            f"{file.full_classname} => delete (y[es]/n[o]/a[ll]/c[ancel]) (n)? "
         )
-        choice = choice.lower()[0] if choice else "n"
-        if choice == "a":
+    else:
+        choice = input(
+            f"{(level - 1) * 2 * ' ' }∟ {file.full_classname} => delete (y[es]/n[o]/a[ll]/c[ancel]) (n)? "
+        )
+    choice = choice.lower()[0] if choice else "n"
+    if choice == "a" or choice == "c":
+        return choice
+    elif choice == "y":
+        found += [file]
+        for called in file.called:
+            if not called.is_used and called not in found and called not in to_delete:
+                stop = remove_file(called, level + 1, to_delete, found)
+                if stop is not None:
+                    return stop
+    return None
+
+
+def remove_files(db):
+    found = []
+    to_delete = []
+    for file in db.invalid:
+        stop = remove_file(file, to_delete=to_delete, found=found)
+        if stop == "a":
             to_delete = [file.filename for file in db.unused]
             break
-        elif choice == "c":
+        elif stop == "c":
             to_delete = []
             break
-        elif choice == "y":
-            to_delete += [file.filename]
     t0 = time()
     for filename in to_delete:
         os.unlink(filename)
