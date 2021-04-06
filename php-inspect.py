@@ -283,7 +283,7 @@ def write_output(db, filename):
     time_print(t0, f"wrote {len(db.unused)} lines in {filename}")
 
 
-def remove_file(file, level=0, to_delete=[], found=[]):
+def remove_file(file, level=0, to_delete=[]):
     if level == 0:
         choice = input(
             f"{file.full_classname} => delete (y[es]/n[o]/a[ll]/c[ancel]) (n)? "
@@ -296,20 +296,23 @@ def remove_file(file, level=0, to_delete=[], found=[]):
     if choice == "a" or choice == "c":
         return choice
     elif choice == "y":
-        found += [file]
+        to_delete += [file]
         for called in file.called:
-            if not called.is_used and called not in found and called not in to_delete:
-                stop = remove_file(called, level + 1, to_delete, found)
-                if stop is not None:
-                    return stop
+            if not called.is_used and called not in to_delete:
+                for caller in called.callers:
+                    if caller not in to_delete:
+                        break
+                else:
+                    stop = remove_file(called, level + 1, to_delete)
+                    if stop is not None:
+                        return stop
     return None
 
 
 def remove_files(db):
-    found = []
     to_delete = []
     for file in db.invalid:
-        stop = remove_file(file, to_delete=to_delete, found=found)
+        stop = remove_file(file, to_delete=to_delete)
         if stop == "a":
             to_delete = [file.filename for file in db.unused]
             break
