@@ -141,10 +141,13 @@ class File:
                     to_detect = 3 if other_file.classname in self.classname else 2
                     # import + (classname) + usage
                     return re.count(other_file.classname, self.content) >= to_detect
-                if other_file.classname in imp.classname:
+                if (
+                    other_file.classname in imp.classname
+                    and imp.full_classname not in self.alias_imports
+                ):
                     return False
             if other_file.classname in self.classname:
-                return False
+                return re.count(other_file.classname, self.content) >= 2
             return re.search(other_file.classname, self.content)
         else:
             return re.search(other_file.classname, self.content)
