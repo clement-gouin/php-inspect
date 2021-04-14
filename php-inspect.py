@@ -4,9 +4,6 @@ from time import time
 from configparser import ConfigParser
 
 
-re.count = lambda pattern, string: len(re.findall(pattern, string))
-
-
 def dir_walk(*paths, file_filter=None):
     if len(paths) != 1:
         return [os.path.join(path, item) for path in paths for item in dir_walk(path)]
@@ -35,17 +32,24 @@ class DB:
         self.files = []
         self.entrypoints = []
         self.classes = {}
+        self.unused = []
+        self.used = []
+        self.unused_func = []
+        self.unused_func_lines = 0
 
     def init(self):
-        filenames = dir_walk(self.root_path, file_filter=r".*.php")
+        filenames = dir_walk(self.root_path, file_filter=r".+\.php$")
         self.files = [File(filename, False) for filename in filenames]
 
-        self.entrypoints = dir_walk(*self.entrypoint_paths, file_filter=r".*.php")
+        self.entrypoints = dir_walk(*self.entrypoint_paths, file_filter=r".+\.php$")
         self.files += [File(filename, True) for filename in self.entrypoints]
 
     def load(self):
         for file in self.files:
             file.load(self.root_path)
+
+        for file in self.files:
+            file.find_duplicates(self)
 
         self.classes = {
             file.full_classname: file for file in self.files if file.is_class
@@ -54,6 +58,7 @@ class DB:
     def scan(self):
         for file in self.classes.values():
             file.analyse(self)
+
         self.invalid = [
             file
             for file in self.classes.values()
@@ -61,13 +66,19 @@ class DB:
         ]
         self.unused = [file for file in self.classes.values() if not file.is_used]
         self.used = [file for file in self.classes.values() if file.is_used]
-        self.unused_func_count = sum(
-            [len(file.get_unused_functions()) for file in self.used]
-        )
+
+        for file in self.classes.values():
+            file.analyse_funcs(self)
+
+        self.unused_func = [
+            func for file in self.used for func in file.get_unused_functions()
+        ]
+        self.unused_func_lines = sum([func.lines for func in self.unused_func])
 
 
 class File:
     ignored = []
+    ignored_func = []
 
     def __init__(self, filename, is_entrypoint):
         self.filename = filename
@@ -85,18 +96,25 @@ class File:
         self.called = []
         self._imports = None
         self._is_used = None
+        self.parent = None
 
     def load(self, root_path):
         with open(os.path.join(root_path, self.filename)) as f:
             self.content = f.read()
         if not self.is_entrypoint:
             self.lines = self.content.split("\n")
-            for line in self.lines:
+            for i, line in enumerate(self.lines):
                 line = line.strip()
                 m1 = re.match(r"^namespace (App\\[\\\w]+);$", line)
                 m2 = re.match(r"^use (App\\[\\\w]+)( as (\w+))?;$", line)
-                m3 = re.match(r"^(abstract\s+)?(class|interface|trait)\s+(\w+)", line)
-                m4 = re.match(r"^(public|protected|private)\s+function\s+(\w+)", line)
+                m3 = re.match(
+                    r"^(abstract\s+)?(class|interface|trait)\s+(\w+)(\s+extends\s+(\w+))?",
+                    line,
+                )
+                m4 = re.match(
+                    r"^(abstract\s+)?(public|protected|private)\s+function\s+(\w+)",
+                    line,
+                )
                 if m1:
                     self.namespace = m1.groups()[0]
                 if m2:
@@ -104,32 +122,77 @@ class File:
                     if m2.groups()[2]:
                         self.alias_imports[self.raw_imports[-1]] = m2.groups()[2]
                 if m3:
-                    self.classname = m3.groups()[-1]
-                    self.type = m3.groups()[-2]
-                if m4 and not m4.groups()[1].startswith("__"):
-                    self.functions += [Function(m4.groups()[0], m4.groups()[1])]
+                    self.classname = m3.groups()[2]
+                    self.type = m3.groups()[1]
+                    if m3.groups()[4] is not None:
+                        self.parent = m3.groups()[4]
+                if m4 and not m4.groups()[2].startswith("__"):
+                    func = Function(self, m4.groups()[1], m4.groups()[2], i)
+                    func.load()
+                    self.functions += [func]
             if self.is_class:
                 self.full_classname = f"{self.namespace}\\{self.classname}"
 
+    def find_duplicates(self, db):
+        if self.is_class:
+            dups = [
+                file
+                for file in db.files
+                if file != self
+                and file.is_class
+                and file.full_classname == self.full_classname
+            ]
+            if len(dups) > 0:
+                print("duplicates for:", self.full_classname)
+                print(" ∟", self.filename)
+                for file in dups:
+                    print(" ∟", file.filename)
+                    file.namespace = None
+
     def analyse(self, db):
         if self.is_class:
+            for file in db.files:
+                if file.filename != self.filename and file.is_calling(db, self):
+                    self.callers += [file]
+                    file.called += [self]
+
+    def analyse_funcs(self, db):
+        if self.is_class and self.is_used:
             public_func = [
                 func
                 for func in self.functions
                 if func.type == "public" or func.type == "protected"
             ]
             for file in db.files:
-                if file.filename != self.filename:
-                    if file.is_calling(db, self):
-                        self.callers += [file]
-                        file.called += [self]
-                    for func in public_func:
-                        if re.search(func.name, file.content):
-                            func.callers += [file]
-                else:
+                if file == self:
                     for func in self.functions:
-                        if re.count(func.name, self.content) >= 2:
-                            func.callers += [self]
+                        if file.content.lower().count(func.name.lower()) >= 2:
+                            func.callers += [file]
+                elif self.parent is not None and self.parent == file.classname:
+                    for func in public_func:
+                        if file.content.lower().count(func.name.lower()) >= 2:
+                            func.callers += [file]
+                elif file.parent is not None and file.parent == self.classname:
+                    for func in public_func:
+                        for other_func in file.functions:
+                            if other_func.name == func.name:
+                                if file.content.lower().count(func.name.lower()) >= 2:
+                                    func.callers += [file]
+                                break
+                        else:
+                            if re.search(func.name.lower(), file.content.lower()):
+                                func.callers += [file]
+                else:
+                    for func in public_func:
+                        for other_func in file.functions:
+                            if (
+                                other_func.name == func.name
+                                and file.type != "interface"
+                            ):
+                                break
+                        else:
+                            if re.search(func.name.lower(), file.content.lower()):
+                                func.callers += [file]
 
     def is_calling(self, db, other_file):
         if self.is_class:
@@ -137,36 +200,42 @@ class File:
                 if imp == other_file:
                     if imp.full_classname in self.alias_imports:
                         to_find = self.alias_imports[imp.full_classname]
-                        return re.count(to_find, self.content) >= 2
+                        return self.content.count(to_find) >= 2
                     to_detect = 3 if other_file.classname in self.classname else 2
                     # import + (classname) + usage
-                    return re.count(other_file.classname, self.content) >= to_detect
+                    return self.content.count(other_file.classname) >= to_detect
                 if (
                     other_file.classname in imp.classname
                     and imp.full_classname not in self.alias_imports
                 ):
                     return False
             if other_file.classname in self.classname:
-                return re.count(other_file.classname, self.content) >= 2
+                return self.content.count(other_file.classname) >= 2
             return re.search(other_file.classname, self.content)
         else:
             return re.search(other_file.classname, self.content)
 
     def is_used_full(self, scanned):
-        if not self.is_class or self.full_classname in self.__class__.ignored:
+        if not self.is_class or self.full_classname in File.ignored:
             return True
         if self._is_used is None:
-            for ign in self.__class__.ignored:
+            for ign in File.ignored:
                 if self.full_classname.startswith(ign):
                     self._is_used = True
                     break
             else:
+                should_update = True
                 for caller in self.callers:
                     if caller not in scanned and caller.is_used_full(scanned + [self]):
                         self._is_used = True
                         break
+                    elif caller in scanned:
+                        should_update = False
                 else:
-                    self._is_used = False
+                    if should_update:
+                        self._is_used = False
+                    else:
+                        return False
         return self._is_used
 
     def get_imports(self, db):
@@ -177,6 +246,11 @@ class File:
         return self._imports
 
     def get_unused_functions(self):
+        if self.type == "interface":
+            return []
+        for ign in File.ignored_func:
+            if self.full_classname.startswith(ign):
+                return []
         return [func for func in self.functions if not func.is_used]
 
     @property
@@ -193,7 +267,16 @@ class File:
 
     def __repr__(self):
         if self.is_class:
-            return f"{self.type} {self.full_classname} ({len(self.functions)} functions, {(len(self.callers))} callers)"
+            infos = [f"{len(self.functions)} functions"]
+            if self.is_used:
+                infos += [f"{len(self.callers)} callers"]
+            elif len(self.callers) > 0:
+                infos += [f"{len(self.callers)} unused callers"]
+            else:
+                infos += [f"unused"]
+            if self.parent is not None:
+                infos += [f"extends '{self.parent}'"]
+            return f"{self.type} {self.full_classname} ({', '.join(infos)})"
         elif self.is_entrypoint:
             return f"entrypoint - {self.filename}"
         else:
@@ -201,16 +284,46 @@ class File:
 
 
 class Function:
-    def __init__(self, type, name):
+    ignored_func_names = []
+
+    def __init__(self, file, type, name, start_line):
+        self.file = file
         if name.startswith("scope"):
             self.name = name[5].lower() + name[6:]
         else:
             self.name = name
         self.type = type
         self.callers = []
+        self.start_line = start_line
+        self.end_line = None
+        self.comment_lines = 0
+
+    def load(self):
+        if self.file.lines[self.start_line].strip().endswith(";"):
+            self.end_line = self.start_line
+        else:
+            state = 0
+            found = False
+            for i, line in enumerate(self.file.lines[self.start_line :]):
+                state += line.count("{") - line.count("}")
+                found = found or line.count("{") > 0
+                if state == 0 and found:
+                    self.end_line = self.start_line + i
+                    break
+            if self.file.lines[self.start_line - 1].strip().endswith("*/"):
+                while self.start_line >= 0 and not self.file.lines[
+                    self.start_line
+                ].strip().startswith("/**"):
+                    self.start_line -= 1
+                    self.comment_lines += 1
+            if not self.file.lines[self.start_line - 1].strip():
+                self.start_line -= 1
+                self.comment_lines += 1
 
     @property
     def is_used(self):
+        if self.name in Function.ignored_func_names:
+            return True
         if len(self.callers) == 0:
             return False
         for caller in self.callers:
@@ -218,8 +331,19 @@ class Function:
                 return True
         return False
 
+    @property
+    def lines(self):
+        return self.end_line - self.start_line - self.comment_lines
+
     def __repr__(self):
-        return f"{self.type} function {self.name} ({len(self.callers)} callers)"
+        infos = [f"{self.lines} lines"]
+        if self.is_used:
+            infos += [f"{len(self.callers)} callers"]
+        elif len(self.callers) > 0:
+            infos += [f"{len(self.callers)} unused callers"]
+        else:
+            infos += [f"unused"]
+        return f"{self.type} function {self.name} ({', '.join(infos)})"
 
 
 def time_print(t0, message):
@@ -238,39 +362,56 @@ def print_branch(file, level=0, found=[]):
 
 
 def print_invalid_branches(db):
-    print("\n\n====IGNORED====")
+    print(f"\n\n==== {len(File.ignored)} IGNORED ====")
     for name in File.ignored:
         print(name)
-    print("\n\n====INVALID BRANCHES====")
+    print(f"\n\n==== {len(db.invalid)} INVALID BRANCHES ({len(db.unused)} unused) ====")
     found = []
     for file in db.invalid:
         print_branch(file, found=found)
 
 
 def print_unused_functions(db):
-    print("\n\n====UNUSED FUNCTIONS====")
+    print(
+        f"\n\n==== {len(db.unused_func)} UNUSED FUNCTIONS ({db.unused_func_lines} lines) ===="
+    )
     for file in db.used:
         funcs = file.get_unused_functions()
         if len(funcs) > 0:
             print(file)
             for func in funcs:
-                print("->", func)
+                print(" ∟", func)
             print()
 
 
 def print_specific(db, names):
-    print("\n\n====SPECIFIC CLASSES====")
+    print("\n\n==== SPECIFIC CLASSES ====")
     for name in names:
         if name not in db.classes:
             return
         file = db.classes[name]
         print(file)
-        print("callers:")
-        for caller in file.callers:
-            if caller.is_used:
-                print("->", caller.full_classname)
-            else:
-                print("x>", caller.full_classname)
+        func_callers = []
+        for func in file.functions:
+            print(" ∟", func)
+            if len(func.callers) < 5:
+                for caller in func.callers:
+                    func_callers += [caller]
+                    if caller != file:
+                        if caller.is_used:
+                            print("    ←", caller)
+                        else:
+                            print("    ↤", caller)
+        other_callers = [
+            caller for caller in file.callers if caller not in func_callers
+        ]
+        if len(other_callers) > 0:
+            print("other callers:")
+            for caller in other_callers:
+                if caller.is_used:
+                    print(" ←", caller)
+                else:
+                    print(" ↤", caller)
         print()
 
 
@@ -292,14 +433,14 @@ def remove_file(file, level=0, to_delete=[], force=False):
     else:
         text = f"{(level - 1) * 2 * ' ' }∟ {file.full_classname} => delete (yes/no/all/cancel/recursive) (n)? "
     if force:
-        print(text + "r")
-        choice = "r"
+        print(text + "y")
+        choice = "y"
     else:
         choice = input(text)
         choice = choice.lower()[0] if choice else "n"
-    if choice == "a" or choice == "c":
+    if choice == "c":
         return choice
-    elif choice == "y" or choice == "r":
+    if choice == "y" or choice == "r" or choice == "a":
         to_delete += [file]
         for called in file.called:
             if not called.is_used and called not in to_delete:
@@ -307,26 +448,77 @@ def remove_file(file, level=0, to_delete=[], force=False):
                     if caller not in to_delete:
                         break
                 else:
-                    stop = remove_file(called, level + 1, to_delete, choice == "r")
-                    if stop is not None:
-                        return stop
-    return None
+                    new_choice = remove_file(
+                        called,
+                        level + 1,
+                        to_delete,
+                        force or choice == "r" or choice == "a",
+                    )
+                    if new_choice == "c":
+                        return new_choice
+    return "a" if choice == "a" else None
 
 
 def remove_files(db):
+    print("\n\n==== REMOVING UNUSED FILES ====")
     to_delete = []
+    force = False
     for file in db.invalid:
-        stop = remove_file(file, to_delete=to_delete)
-        if stop == "a":
-            to_delete = db.unused
-            break
-        elif stop == "c":
+        choice = remove_file(file, to_delete=to_delete, force=force)
+        if choice == "a":
+            force = True
+        elif choice == "c":
             to_delete = []
             break
     t0 = time()
     for file in to_delete:
         os.unlink(file.filename)
     time_print(t0, f"removed {len(to_delete)} files")
+
+
+def remove_func(db):
+    print("\n\n==== REMOVING UNUSED FUNCTIONS ====")
+    to_remove = []
+    stop = False
+    force = False
+    for file in db.used:
+        if stop:
+            break
+        funcs = file.get_unused_functions()
+        funcs.sort(key=lambda func: func.start_line, reverse=True)
+        if len(funcs) > 0:
+            print(file)
+        force_file = False
+        for func in funcs:
+            text = f" ∟ {func.type} function {func.name} ({func.lines} lines) => delete (yes/no/all/file/cancel) (n)? "
+            if force or force_file:
+                print(text + "y")
+                choice = "y"
+            else:
+                choice = input(text)
+                choice = choice.lower()[0] if choice else "n"
+            if choice == "y":
+                to_remove += [func]
+            elif choice == "a":
+                to_remove += [func]
+                force = True
+            elif choice == "f":
+                force_file = True
+            elif choice == "c":
+                stop = True
+                to_remove = []
+                break
+    to_rewrite = []
+    for func in to_remove:
+        file = func.file
+        file.lines = file.lines[: func.start_line] + file.lines[func.end_line + 1 :]
+        if file not in to_rewrite:
+            to_rewrite += [file]
+    print(f"removed {len(to_remove)} functions")
+    for file in to_rewrite:
+        with open(file.filename, mode="w") as f:
+            f.write("\n".join(file.lines))
+    print(f"rewrote {len(to_rewrite)} files")
 
 
 def main():
@@ -343,6 +535,8 @@ def main():
     db = DB(config.get("input", "root_path"), config.getlist("input", "entrypoints"))
 
     File.ignored = config.getlist("input", "ignored")
+    File.ignored_func = File.ignored + config.getlist("input", "ignored_func")
+    Function.ignored_func_names = config.getlist("input", "ignored_func_names")
 
     t0 = time()
     db.init()
@@ -358,8 +552,11 @@ def main():
     db.scan()
     time_print(
         t0,
-        f"scanned classes and found {len(db.invalid)} invalid roots for {len(db.unused)} unused files and {db.unused_func_count} unused functions",
+        f"scanned classes and found {len(db.invalid)} invalid roots for {len(db.unused)} unused files and {len(db.unused_func)} unused functions ({db.unused_func_lines} lines)",
     )
+
+    if config.get("output", "output_file"):
+        write_output(db, config.get("output", "output_file"))
 
     if config.getboolean("output", "print_invalid"):
         print_invalid_branches(db)
@@ -370,11 +567,11 @@ def main():
     if config.getboolean("output", "print_specific"):
         print_specific(db, config.getlist("output", "to_scan"))
 
-    if config.get("output", "output_file"):
-        write_output(db, config.get("output", "output_file"))
-
     if config.getboolean("output", "remove_files"):
         remove_files(db)
+
+    if config.getboolean("output", "remove_func"):
+        remove_func(db)
 
 
 main()
