@@ -23,6 +23,21 @@ def dir_walk(*paths, file_filter=None):
     return dir_items + items
 
 
+def backward_comment(lines, start_line):
+    comment_lines = 0
+    deprecated = False
+    if start_line > 0 and lines[start_line - 1].strip().endswith("*/"):
+        while start_line >= 0 and not lines[start_line].strip().startswith("/**"):
+            start_line -= 1
+            comment_lines += 1
+            if start_line >= 0 and "@deprecated" in lines[start_line].lower():
+                deprecated = True
+    if start_line > 0 and not lines[start_line - 1].strip():
+        start_line -= 1
+        comment_lines += 1
+    return start_line, comment_lines, deprecated
+
+
 class DB:
     def __init__(self, root_path, entrypoint_paths):
         self.root_path = os.path.realpath(root_path)
@@ -32,6 +47,8 @@ class DB:
         self.files = []
         self.entrypoints = []
         self.classes = {}
+        self.invalid_roots = []
+        self.invalid_roots_deprecated = []
         self.unused = []
         self.used = []
         self.unused_func = []
@@ -59,10 +76,11 @@ class DB:
         for file in self.classes.values():
             file.analyse(self)
 
-        self.invalid = [
-            file
-            for file in self.classes.values()
-            if len(file.callers) == 0 and not file.is_used
+        self.invalid_roots = [
+            file for file in self.classes.values() if file.is_invalid_root(False)
+        ]
+        self.invalid_roots_deprecated = [
+            file for file in self.classes.values() if file.is_invalid_root(True)
         ]
         self.unused = [file for file in self.classes.values() if not file.is_used]
         self.used = [file for file in self.classes.values() if file.is_used]
@@ -94,6 +112,9 @@ class File:
         self.functions = []
         self.callers = []
         self.called = []
+        self.deprecated = False
+        self.class_start_line = None
+        self.class_comment_lines = None
         self._imports = None
         self._is_used = None
         self.parent = None
@@ -105,29 +126,39 @@ class File:
             self.lines = self.content.split("\n")
             for i, line in enumerate(self.lines):
                 line = line.strip()
-                m1 = re.match(r"^namespace (App\\[\\\w]+);$", line)
-                m2 = re.match(r"^use (App\\[\\\w]+)( as (\w+))?;$", line)
-                m3 = re.match(
+                match_namespace = re.match(r"^namespace (App\\[\\\w]+);$", line)
+                match_import = re.match(r"^use (App\\[\\\w]+)( as (\w+))?;$", line)
+                match_class = re.match(
                     r"^(abstract\s+)?(class|interface|trait)\s+(\w+)(\s+extends\s+(\w+))?",
                     line,
                 )
-                m4 = re.match(
-                    r"^(abstract\s+)?(public|protected|private)\s+function\s+(\w+)",
+                match_function = re.match(
+                    r"^(abstract\s+)?(public|protected|private)\s+(static\s+)?function\s+(\w+)",
                     line,
                 )
-                if m1:
-                    self.namespace = m1.groups()[0]
-                if m2:
-                    self.raw_imports += [m2.groups()[0]]
-                    if m2.groups()[2]:
-                        self.alias_imports[self.raw_imports[-1]] = m2.groups()[2]
-                if m3:
-                    self.classname = m3.groups()[2]
-                    self.type = m3.groups()[1]
-                    if m3.groups()[4] is not None:
-                        self.parent = m3.groups()[4]
-                if m4 and not m4.groups()[2].startswith("__"):
-                    func = Function(self, m4.groups()[1], m4.groups()[2], i)
+                if match_namespace and self.namespace is None:
+                    self.namespace = match_namespace.groups()[0]
+                if match_import:
+                    self.raw_imports += [match_import.groups()[0]]
+                    if match_import.groups()[2]:
+                        self.alias_imports[
+                            self.raw_imports[-1]
+                        ] = match_import.groups()[2]
+                if match_class and self.classname is None:
+                    self.class_line = i
+                    (
+                        self.class_start_line,
+                        self.class_comment_lines,
+                        self.deprecated,
+                    ) = backward_comment(self.lines, i)
+                    self.classname = match_class.groups()[2]
+                    self.type = match_class.groups()[1]
+                    if match_class.groups()[4] is not None:
+                        self.parent = match_class.groups()[4]
+                if match_function and not match_function.groups()[3].startswith("__"):
+                    func = Function(
+                        self, match_function.groups()[1], match_function.groups()[3], i
+                    )
                     func.load()
                     self.functions += [func]
             if self.is_class:
@@ -188,6 +219,7 @@ class File:
                             if (
                                 other_func.name == func.name
                                 and file.type != "interface"
+                                and not other_func.call_other_same
                             ):
                                 break
                         else:
@@ -218,6 +250,8 @@ class File:
     def is_used_full(self, scanned):
         if not self.is_class or self.full_classname in File.ignored:
             return True
+        elif self.deprecated:
+            return False
         if self._is_used is None:
             for ign in File.ignored:
                 if self.full_classname.startswith(ign):
@@ -252,6 +286,16 @@ class File:
             if self.full_classname.startswith(ign):
                 return []
         return [func for func in self.functions if not func.is_used]
+
+    def is_invalid_root(self, exclude_deprecated):
+        if self.is_used or self.deprecated and exclude_deprecated:
+            return False
+        if exclude_deprecated:
+            return (
+                len([caller for caller in self.callers if not caller.deprecated]) == 0
+            )
+        else:
+            return len(self.callers) == 0
 
     @property
     def is_used(self):
@@ -297,6 +341,8 @@ class Function:
         self.start_line = start_line
         self.end_line = None
         self.comment_lines = 0
+        self.call_other_same = False
+        self.deprecated = False
 
     def load(self):
         if self.file.lines[self.start_line].strip().endswith(";"):
@@ -304,27 +350,24 @@ class Function:
         else:
             state = 0
             found = False
+            name_count = 0
             for i, line in enumerate(self.file.lines[self.start_line :]):
                 state += line.count("{") - line.count("}")
                 found = found or line.count("{") > 0
+                name_count += line.lower().count(self.name.lower())
                 if state == 0 and found:
                     self.end_line = self.start_line + i
                     break
-            if self.file.lines[self.start_line - 1].strip().endswith("*/"):
-                while self.start_line >= 0 and not self.file.lines[
-                    self.start_line
-                ].strip().startswith("/**"):
-                    self.start_line -= 1
-                    self.comment_lines += 1
-            if not self.file.lines[self.start_line - 1].strip():
-                self.start_line -= 1
-                self.comment_lines += 1
+            self.call_other_same = name_count > 1
+            self.start_line, self.comment_lines, self.deprecated = backward_comment(
+                self.file.lines, self.start_line
+            )
 
     @property
     def is_used(self):
         if self.name in Function.ignored_func_names:
             return True
-        if len(self.callers) == 0:
+        if self.deprecated or len(self.callers) == 0:
             return False
         for caller in self.callers:
             if caller.is_used:
@@ -350,7 +393,7 @@ def time_print(t0, message):
     print(f"({1000*(time()-t0):.1f}ms) {message}")
 
 
-def print_branch(file, level=0, found=[]):
+def print_branch(file, print_deprecated, level=0, found=[]):
     if level == 0:
         print(file.full_classname)
     else:
@@ -358,25 +401,30 @@ def print_branch(file, level=0, found=[]):
     found += [file]
     for called in file.called:
         if not called.is_used and called not in found:
-            print_branch(called, level + 1, found)
+            print_branch(called, print_deprecated, level + 1, found)
 
 
-def print_invalid_branches(db):
+def print_invalid_branches(db, print_deprecated):
+    roots = db.invalid_roots if print_deprecated else db.invalid_roots_deprecated
     print(f"\n\n==== {len(File.ignored)} IGNORED ====")
     for name in File.ignored:
         print(name)
-    print(f"\n\n==== {len(db.invalid)} INVALID BRANCHES ({len(db.unused)} unused) ====")
+    print(f"\n\n==== {len(roots)} INVALID BRANCHES ({len(db.unused)} unused) ====")
     found = []
-    for file in db.invalid:
-        print_branch(file, found=found)
+    for file in roots:
+        print_branch(file, print_deprecated, found=found)
 
 
-def print_unused_functions(db):
-    print(
-        f"\n\n==== {len(db.unused_func)} UNUSED FUNCTIONS ({db.unused_func_lines} lines) ===="
-    )
+def print_unused_functions(db, print_deprecated):
+    funcs = [func for func in db.unused_func if print_deprecated or not func.deprecated]
+    lines = sum([func.lines for func in funcs])
+    print(f"\n\n==== {len(funcs)} UNUSED FUNCTIONS ({lines} lines) ====")
     for file in db.used:
-        funcs = file.get_unused_functions()
+        funcs = [
+            func
+            for func in file.get_unused_functions()
+            if print_deprecated or not func.deprecated
+        ]
         if len(funcs) > 0:
             print(file)
             for func in funcs:
@@ -388,6 +436,7 @@ def print_specific(db, names):
     print("\n\n==== SPECIFIC CLASSES ====")
     for name in names:
         if name not in db.classes:
+            print("not found:", name)
             return
         file = db.classes[name]
         print(file)
@@ -463,7 +512,7 @@ def remove_files(db):
     print("\n\n==== REMOVING UNUSED FILES ====")
     to_delete = []
     force = False
-    for file in db.invalid:
+    for file in db.invalid_roots:
         choice = remove_file(file, to_delete=to_delete, force=force)
         if choice == "a":
             force = True
@@ -552,17 +601,19 @@ def main():
     db.scan()
     time_print(
         t0,
-        f"scanned classes and found {len(db.invalid)} invalid roots for {len(db.unused)} unused files and {len(db.unused_func)} unused functions ({db.unused_func_lines} lines)",
+        f"scanned classes and found {len(db.invalid_roots)} invalid roots for {len(db.unused)} unused files and {len(db.unused_func)} unused functions ({db.unused_func_lines} lines)",
     )
 
     if config.get("output", "output_file"):
         write_output(db, config.get("output", "output_file"))
 
+    print_deprecated = config.getboolean("output", "print_deprecated")
+
     if config.getboolean("output", "print_invalid"):
-        print_invalid_branches(db)
+        print_invalid_branches(db, print_deprecated)
 
     if config.getboolean("output", "print_functions"):
-        print_unused_functions(db)
+        print_unused_functions(db, print_deprecated)
 
     if config.getboolean("output", "print_specific"):
         print_specific(db, config.getlist("output", "to_scan"))
