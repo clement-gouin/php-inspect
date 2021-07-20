@@ -15,9 +15,9 @@ COLORS = [
     "075",  # #5fafff
 ]
 
-KEYWORD_COLOR = "075"  # #5fafff
-NAME_COLOR = "227"  # #ffff5f
-NUMBER_COLOR = "155"  # #afff5f
+KEYWORD_COLOR = "111"  # #87afff
+NAME_COLOR = "228"  # #ffff87
+NUMBER_COLOR = "156"  # #afff87
 
 KEYWORDS = [
     "abstract",
