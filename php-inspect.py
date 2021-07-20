@@ -3,6 +3,31 @@ import re
 from time import time
 from configparser import ConfigParser
 
+COLORS = [
+    "087",  # #5fffff
+    "085",  # #5fffaf
+    "155",  # #afff5f
+    "227",  # #ffff5f
+    "215",  # #ffaf5f
+    "205",  # #ff5faf
+    "207",  # #ff5fff
+    "135",  # #af5fff
+    "075",  # #5fafff
+]
+
+KEYWORD_COLOR = "075"  # 5fafff
+NAME_COLOR = "227"  # ffff5f
+
+
+def colorize(text, color):
+    return f"\033[38;5;{color}m{text}\033[0m"
+
+
+def colorize_namespace(ns):
+    return "\\".join(
+        colorize(fragment, COLORS[i % len(COLORS)]) for i, fragment in enumerate(ns.split("\\"))
+    )
+
 
 def dir_walk(*paths, file_filter=None):
     if len(paths) != 1:
@@ -320,11 +345,11 @@ class File:
                 infos += [f"unused"]
             if self.parent is not None:
                 infos += [f"extends '{self.parent}'"]
-            return f"{self.type} {self.full_classname} ({', '.join(infos)})"
+            return f"{colorize(self.type, KEYWORD_COLOR)} {colorize_namespace(self.full_classname)} ({', '.join(infos)})"
         elif self.is_entrypoint:
-            return f"entrypoint - {self.filename}"
+            return f"{colorize('entrypoint', KEYWORD_COLOR)} - {colorize_namespace(self.filename)}"
         else:
-            return f"unknown - {self.filename}"
+            return f"{colorize('unknown', KEYWORD_COLOR)} - {colorize_namespace(self.filename)}"
 
 
 class Function:
@@ -386,7 +411,7 @@ class Function:
             infos += [f"{len(self.callers)} unused callers"]
         else:
             infos += [f"unused"]
-        return f"{self.type} function {self.name} ({', '.join(infos)})"
+        return f"{colorize(self.type, KEYWORD_COLOR)} {colorize('function', KEYWORD_COLOR)} {colorize(self.name, NAME_COLOR)} ({', '.join(infos)})"
 
 
 def time_print(t0, message):
@@ -395,9 +420,9 @@ def time_print(t0, message):
 
 def print_branch(file, print_deprecated, level=0, found=[]):
     if level == 0:
-        print(file.full_classname)
+        print(colorize_namespace(file.full_classname))
     else:
-        print((level - 1) * 2 * " ", "∟", file.full_classname)
+        print((level - 1) * 2 * " ", "∟", colorize_namespace(file.full_classname))
     found += [file]
     for called in file.called:
         if not called.is_used and called not in found:
@@ -408,7 +433,7 @@ def print_invalid_branches(db, print_deprecated):
     roots = db.invalid_roots if print_deprecated else db.invalid_roots_deprecated
     print(f"\n\n==== {len(File.ignored)} IGNORED ====")
     for name in File.ignored:
-        print(name)
+        print(colorize_namespace(name))
     print(f"\n\n==== {len(roots)} INVALID BRANCHES ({len(db.unused)} unused) ====")
     found = []
     for file in roots:
@@ -478,9 +503,9 @@ def write_output(db, filename):
 
 def remove_file(file, level=0, to_delete=[], force=False):
     if level == 0:
-        text = f"{file.full_classname} => delete (yes/no/all/cancel/recursive) (n)? "
+        text = f"{colorize_namespace(file.full_classname)} => delete (yes/no/all/cancel/recursive) (n)? "
     else:
-        text = f"{(level - 1) * 2 * ' ' }∟ {file.full_classname} => delete (yes/no/all/cancel/recursive) (n)? "
+        text = f"{(level - 1) * 2 * ' ' }∟ {colorize_namespace(file.full_classname)} => delete (yes/no/all/cancel/recursive) (n)? "
     if force:
         print(text + "y")
         choice = "y"
@@ -539,7 +564,7 @@ def remove_func(db):
             print(file)
         force_file = False
         for func in funcs:
-            text = f" ∟ {func.type} function {func.name} ({func.lines} lines) => delete (yes/no/all/file/cancel) (n)? "
+            text = f" ∟ {colorize(func.type, KEYWORD_COLOR)} {colorize('function', KEYWORD_COLOR)} {colorize(func.name, NAME_COLOR)} ({func.lines} lines) => delete (yes/no/all/file/cancel) (n)? "
             if force or force_file:
                 print(text + "y")
                 choice = "y"
