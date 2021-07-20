@@ -15,18 +15,57 @@ COLORS = [
     "075",  # #5fafff
 ]
 
-KEYWORD_COLOR = "075"  # 5fafff
-NAME_COLOR = "227"  # ffff5f
+KEYWORD_COLOR = "075"  # #5fafff
+NAME_COLOR = "227"  # #ffff5f
+NUMBER_COLOR = "155"  # #afff5f
+
+KEYWORDS = [
+    "abstract",
+    "branches",
+    "callers",
+    "class",
+    "entrypoint",
+    "extends",
+    "function",
+    "functions",
+    "interface",
+    "lines",
+    "public",
+    "private",
+    "protected",
+    "static",
+    "trait",
+    "unknown",
+    "unused",
+]
 
 
-def colorize(text, color):
-    return f"\033[38;5;{color}m{text}\033[0m"
+def colorize(text, color=None):
+    if color is None:
+        return auto_colorize(str(text))
+    return f"\033[38;5;{color}m{str(text)}\033[0m"
 
 
 def colorize_namespace(ns):
     return "\\".join(
-        colorize(fragment, COLORS[i % len(COLORS)]) for i, fragment in enumerate(ns.split("\\"))
+        colorize(fragment, COLORS[i % len(COLORS)])
+        for i, fragment in enumerate(ns.split("\\"))
     )
+
+
+def auto_colorize(text):
+    if " " in text:
+        return " ".join(auto_colorize(fragment) for fragment in text.split(" "))
+    if text in KEYWORDS:
+        return colorize(text, KEYWORD_COLOR)
+    elif text.isdigit():
+        return colorize(text, NUMBER_COLOR)
+    elif text.isalnum():
+        return colorize(text, NAME_COLOR)
+    elif "\\" in text or "/" in text:
+        return colorize_namespace(text)
+    else:
+        return text
 
 
 def dir_walk(*paths, file_filter=None):
@@ -336,20 +375,20 @@ class File:
 
     def __repr__(self):
         if self.is_class:
-            infos = [f"{len(self.functions)} functions"]
+            infos = [colorize(f"{len(self.functions)} functions")]
             if self.is_used:
-                infos += [f"{len(self.callers)} callers"]
+                infos += [colorize(f"{len(self.callers)} callers")]
             elif len(self.callers) > 0:
-                infos += [f"{len(self.callers)} unused callers"]
+                infos += [colorize(f"{len(self.callers)} unused callers")]
             else:
-                infos += [f"unused"]
+                infos += [colorize(f"unused")]
             if self.parent is not None:
-                infos += [f"extends '{self.parent}'"]
-            return f"{colorize(self.type, KEYWORD_COLOR)} {colorize_namespace(self.full_classname)} ({', '.join(infos)})"
+                infos += [colorize(f"extends {self.parent}")]
+            return colorize(f"{self.type} {self.full_classname} ({', '.join(infos)})")
         elif self.is_entrypoint:
-            return f"{colorize('entrypoint', KEYWORD_COLOR)} - {colorize_namespace(self.filename)}"
+            return colorize(f"entrypoint - {self.filename}")
         else:
-            return f"{colorize('unknown', KEYWORD_COLOR)} - {colorize_namespace(self.filename)}"
+            return colorize(f"unknown - {self.filename}")
 
 
 class Function:
@@ -404,14 +443,14 @@ class Function:
         return self.end_line - self.start_line - self.comment_lines
 
     def __repr__(self):
-        infos = [f"{self.lines} lines"]
+        infos = [colorize(f"{self.lines} lines")]
         if self.is_used:
-            infos += [f"{len(self.callers)} callers"]
+            infos += [colorize(f"{len(self.callers)} callers")]
         elif len(self.callers) > 0:
-            infos += [f"{len(self.callers)} unused callers"]
+            infos += [colorize(f"{len(self.callers)} unused callers")]
         else:
-            infos += [f"unused"]
-        return f"{colorize(self.type, KEYWORD_COLOR)} {colorize('function', KEYWORD_COLOR)} {colorize(self.name, NAME_COLOR)} ({', '.join(infos)})"
+            infos += [colorize(f"unused")]
+        return colorize(f"{self.type} function {self.name} ({', '.join(infos)})")
 
 
 def time_print(t0, message):
