@@ -458,6 +458,8 @@ def time_print(t0, message):
 
 
 def print_branch(file, print_deprecated, level=0, found=[]):
+    if file.deprecated and not print_deprecated:
+        return
     if level == 0:
         print(colorize_namespace(file.full_classname))
     else:
