@@ -37,6 +37,7 @@ KEYWORDS = [
     "trait",
     "unknown",
     "unused",
+    "reflexive",
 ]
 
 
@@ -182,6 +183,7 @@ class File:
         self._imports = None
         self._is_used = None
         self.parent = None
+        self.reflexive_call = False
 
     def load(self, root_path):
         with open(os.path.join(root_path, self.filename)) as f:
@@ -198,6 +200,10 @@ class File:
                 )
                 match_function = re.match(
                     r"^(abstract\s+)?(public|protected|private)\s+(static\s+)?function\s+(\w+)",
+                    line,
+                )
+                match_reflexive = re.match(
+                    r".*\$this->({\$|\$\w+\()",
                     line,
                 )
                 if match_namespace and self.namespace is None:
@@ -225,6 +231,8 @@ class File:
                     )
                     func.load()
                     self.functions += [func]
+                if match_reflexive:
+                    self.reflexive_call = True
             if self.is_class:
                 self.full_classname = f"{self.namespace}\\{self.classname}"
 
@@ -431,7 +439,11 @@ class Function:
     def is_used(self):
         if self.name in Function.ignored_func_names:
             return True
-        if self.deprecated or len(self.callers) == 0:
+        if self.deprecated:
+            return False
+        if self.file.reflexive_call:
+            return True
+        if len(self.callers) == 0:
             return False
         for caller in self.callers:
             if caller.is_used:
@@ -445,7 +457,10 @@ class Function:
     def __repr__(self):
         infos = [colorize(f"{self.lines} lines")]
         if self.is_used:
-            infos += [colorize(f"{len(self.callers)} callers")]
+            if len(self.callers) == 0:
+                infos += [colorize(f"reflexive")]
+            else:
+                infos += [colorize(f"{len(self.callers)} callers")]
         elif len(self.callers) > 0:
             infos += [colorize(f"{len(self.callers)} unused callers")]
         else:
