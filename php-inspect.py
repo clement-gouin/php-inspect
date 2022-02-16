@@ -290,7 +290,7 @@ class File:
                         for other_func in file.functions:
                             if (
                                 other_func.name == func.name
-                                and file.type != "interface"
+                                and file.type not in ["interface", "trait"]
                                 and not other_func.call_other_same
                             ):
                                 break
